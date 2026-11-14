@@ -5,12 +5,16 @@ the web page that shows our daily rate.
 
   Our daily rate = BPI selling rate + MARKUP
 
+The rate is a snapshot: the first run on each business day (scheduled for
+9:05 AM Manila time) locks in that day's rate, and later runs that day keep it.
+
 Writes (served by GitHub Pages from the /docs folder):
-  docs/rates.json   history, one row per rate date
+  docs/rates.json   history, one row per day
   docs/index.html   the page people open
 
 Usage:
-  python update_rate.py                  fetch from BPI and update the files
+  python update_rate.py                  take today's snapshot if not taken yet
+  python update_rate.py --force          replace today's snapshot with a new one
   python update_rate.py --html-file F    read BPI's HTML from a local file (testing)
 """
 
@@ -249,7 +253,8 @@ def render_page(history):
       <div class="hint">What to charge and announce to applicants</div>
     </div>
   </div>
-  <p class="muted" style="margin:10px 2px 0">Based on the BPI rate as of {as_of}</p>
+  <p class="muted" style="margin:10px 2px 0">Snapshot taken {checked} (Manila time).
+    BPI rate as of {as_of}.</p>
 
   <h2>Last {min(len(history), TABLE_ROWS)} days</h2>
   <div class="card">{chart_svg(history)}</div>
@@ -265,8 +270,7 @@ def render_page(history):
   </div>
 
   <footer>
-    Page last updated {checked} (Manila time). BPI rates are indicative and may
-    change without notice. Source:
+    BPI rates are indicative and may change without notice. Source:
     <a href="{BPI_URL}">BPI foreign exchange rates</a>.
   </footer>
 </main>
@@ -276,36 +280,50 @@ def render_page(history):
 
 
 # -------------------------------------------------------------------- main
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--html-file", help="read BPI HTML from this file instead of fetching")
-    args = parser.parse_args()
-
-    if args.html_file:
-        page_html = Path(args.html_file).read_text(encoding="utf-8")
-    else:
-        page_html = fetch_html()
-
-    as_of, rate_date, buying, selling = parse_usd(page_html)
+def take_snapshot(history, today, html_file=None):
+    """Fetch BPI's rate and record it as the reference rate for `today`."""
+    page_html = Path(html_file).read_text(encoding="utf-8") if html_file else fetch_html()
+    as_of, _bpi_date, buying, selling = parse_usd(page_html)
     entry = {
-        "date": rate_date,
-        "as_of": as_of,
+        "date": today,  # the day this snapshot is the reference for
+        "as_of": as_of,  # when BPI says its own rate was set
         "buying": buying,
         "selling": selling,
         "markup": MARKUP,
         "our_rate": round(selling + MARKUP, 2),
-        "checked": datetime.now(TZ).isoformat(timespec="seconds"),
+        "checked": datetime.now(TZ).isoformat(timespec="seconds"),  # snapshot time
     }
-    history = update_history(load_history(), entry)
+    print(
+        f"{today}: BPI selling {selling:.2f} + {MARKUP:.2f} = student rate "
+        f"{entry['our_rate']:.2f} (BPI as of {as_of or 'time not shown'})"
+    )
+    return update_history(history, entry)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--html-file", help="read BPI HTML from this file instead of fetching")
+    parser.add_argument("--force", action="store_true",
+                        help="take a new snapshot even if today's was already taken")
+    args = parser.parse_args()
+
+    now = datetime.now(TZ)
+    today = now.strftime("%Y-%m-%d")
+    history = load_history()
+    have_today = any(h["date"] == today for h in history)
+    weekend = now.weekday() >= 5
+
+    # One snapshot per business day: the first run of the day locks in the rate.
+    if args.force or not history or (not have_today and not weekend):
+        history = take_snapshot(history, today, args.html_file)
+    elif have_today:
+        print(f"Snapshot for {today} already taken - keeping it.")
+    else:
+        print("Weekend - no new snapshot, keeping the last one.")
 
     DOCS.mkdir(exist_ok=True)
     HISTORY_FILE.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
     PAGE_FILE.write_text(render_page(history), encoding="utf-8")
-
-    print(
-        f"{rate_date}: BPI selling {selling:.2f} + {MARKUP:.2f} = our rate {entry['our_rate']:.2f} "
-        f"({as_of or 'time not shown'})"
-    )
     print(f"History rows: {len(history)}. Wrote {PAGE_FILE.name} and {HISTORY_FILE.name}.")
     return 0
 
