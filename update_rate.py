@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Fetch BPI's USD/PHP indicative rate, keep a history, and rebuild the web page.
+Fetch BPI's USD/PHP selling rate, add our markup, keep a history, and rebuild
+the web page that shows our daily rate.
+
+  Our daily rate = BPI selling rate + MARKUP
 
 Writes (served by GitHub Pages from the /docs folder):
   docs/rates.json   history, one row per rate date
@@ -20,6 +23,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+# Amount added to BPI's selling rate. Change it here if the markup changes;
+# rows already saved in the history keep the markup they were recorded with.
+MARKUP = 0.50
 
 BPI_URL = "https://www.bpi.com.ph/personal/bank/forex/rates"
 TZ = ZoneInfo("Asia/Manila")
@@ -103,15 +110,24 @@ def update_history(history, entry):
     return history[-MAX_ROWS:]
 
 
+def our_rate(row):
+    """Our rate for a history row (older rows without it use the current markup)."""
+    return row.get("our_rate", round(row["selling"] + MARKUP, 2))
+
+
+def markup_of(row):
+    return row.get("markup", MARKUP)
+
+
 # --------------------------------------------------------------- rendering
 def nice_date(iso):
     return datetime.strptime(iso, "%Y-%m-%d").strftime("%a, %b %d, %Y")
 
 
-def change_html(latest, prev, key):
+def change_html(latest, prev):
     if not prev:
         return '<span class="muted">first day recorded</span>'
-    diff = round(latest[key] - prev[key], 4)
+    diff = round(our_rate(latest) - our_rate(prev), 2)
     if diff == 0:
         return f'<span class="muted">no change vs {nice_date(prev["date"])}</span>'
     arrow, cls = ("&#9650;", "up") if diff > 0 else ("&#9660;", "down")
@@ -126,7 +142,7 @@ def chart_svg(rows):
     if len(rows) < 2:
         return '<p class="muted">The chart appears once there are two or more days of data.</p>'
     W, H, PL, PR, PT, PB = 640, 210, 52, 14, 14, 30
-    vals = [r["buying"] for r in rows] + [r["selling"] for r in rows]
+    vals = [our_rate(r) for r in rows]
     lo, hi = min(vals), max(vals)
     if hi - lo < 0.5:
         mid = (hi + lo) / 2
@@ -141,28 +157,25 @@ def chart_svg(rows):
     def y(v):
         return PT + (H - PT - PB) * (hi - v) / (hi - lo)
 
-    def pts(key):
-        return " ".join(f"{x(i):.1f},{y(r[key]):.1f}" for i, r in enumerate(rows))
+    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
 
     return f"""<svg viewBox="0 0 {W} {H}" role="img"
-  aria-label="Line chart of BPI USD buying and selling rates, last {n} days">
+  aria-label="Line chart of our daily USD rate, last {n} days">
   <line class="grid" x1="{PL}" y1="{y(hi):.1f}" x2="{W-PR}" y2="{y(hi):.1f}"/>
   <line class="grid" x1="{PL}" y1="{y(lo):.1f}" x2="{W-PR}" y2="{y(lo):.1f}"/>
   <text class="axis" x="{PL-6}" y="{y(hi)+4:.1f}" text-anchor="end">{hi:.2f}</text>
   <text class="axis" x="{PL-6}" y="{y(lo)+4:.1f}" text-anchor="end">{lo:.2f}</text>
   <text class="axis" x="{PL}" y="{H-8}" text-anchor="start">{rows[0]["date"]}</text>
   <text class="axis" x="{W-PR}" y="{H-8}" text-anchor="end">{rows[-1]["date"]}</text>
-  <polyline class="line buy" points="{pts("buying")}"/>
-  <polyline class="line sell" points="{pts("selling")}"/>
-</svg>
-<p class="legend"><span class="dot sell"></span> Selling &nbsp; <span class="dot buy"></span> Buying</p>"""
+  <polyline class="line" points="{pts}"/>
+</svg>"""
 
 
 CSS = """
 :root{--bg:#f7f7f5;--card:#fff;--text:#1c1c1a;--muted:#6b6b66;--line:#e3e3de;
---sell:#2563eb;--buy:#0f9d6b;--up:#0f9d6b;--down:#d1342f}
+--accent:#2563eb;--up:#0f9d6b;--down:#d1342f}
 @media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#1f1f1d;--text:#ecece8;
---muted:#9a9a93;--line:#34342f;--sell:#6ea0ff;--buy:#3ccf94;--up:#3ccf94;--down:#ff7a74}}
+--muted:#9a9a93;--line:#34342f;--accent:#6ea0ff;--up:#3ccf94;--down:#ff7a74}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);
 font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -171,30 +184,28 @@ h1{font-size:1.5rem;margin:0 0 4px}
 h2{font-size:1.05rem;margin:32px 0 10px}
 .sub,.muted{color:var(--muted)}
 .sub{margin:0 0 20px}
-.tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
-.tile .label{color:var(--muted);font-size:.85rem}
-.tile .value{font-size:1.9rem;font-weight:650;margin:2px 0;font-variant-numeric:tabular-nums}
-.tile .chg{font-size:.85rem}
-.tile .hint{font-size:.8rem;color:var(--muted);margin-top:8px}
+.hero{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
+.hero .label{color:var(--muted);font-size:.9rem}
+.hero .value{font-size:2.6rem;font-weight:700;line-height:1.15;margin:4px 0;
+font-variant-numeric:tabular-nums}
+.hero .chg{font-size:.9rem}
+.hero .calc{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);
+font-size:.95rem;font-variant-numeric:tabular-nums}
 .up{color:var(--up)}.down{color:var(--down)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
 svg{width:100%;height:auto;display:block}
 .grid{stroke:var(--line);stroke-width:1}
 .axis{fill:var(--muted);font-size:11px}
-.line{fill:none;stroke-width:2.2;stroke-linejoin:round;stroke-linecap:round}
-.line.sell{stroke:var(--sell)}.line.buy{stroke:var(--buy)}
-.legend{margin:6px 4px 0;font-size:.85rem;color:var(--muted)}
-.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px}
-.dot.sell{background:var(--sell)}.dot.buy{background:var(--buy)}
+.line{fill:none;stroke:var(--accent);stroke-width:2.4;stroke-linejoin:round;stroke-linecap:round}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{text-align:right;padding:8px 6px;border-bottom:1px solid var(--line)}
 th:first-child,td:first-child{text-align:left}
 th{font-size:.8rem;color:var(--muted);font-weight:600}
+td.rate{font-weight:650}
 tr:last-child td{border-bottom:0}
 footer{margin-top:28px;font-size:.8rem;color:var(--muted)}
-a{color:var(--sell)}
-@media (max-width:420px){.tile .value{font-size:1.5rem}.tiles{gap:8px}}
+a{color:var(--accent)}
+@media (max-width:420px){.hero .value{font-size:2.1rem}}
 """
 
 
@@ -205,8 +216,8 @@ def render_page(history):
     as_of = html.escape(latest.get("as_of") or latest["date"])
 
     body_rows = "\n".join(
-        f'<tr><td>{nice_date(h["date"])}</td><td>{h["buying"]:.2f}</td>'
-        f'<td>{h["selling"]:.2f}</td></tr>'
+        f'<tr><td>{nice_date(h["date"])}</td><td>{h["selling"]:.2f}</td>'
+        f'<td class="rate">{our_rate(h):.2f}</td></tr>'
         for h in reversed(history[-TABLE_ROWS:])
     )
 
@@ -215,29 +226,22 @@ def render_page(history):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BPI USD Rate</title>
+<title>Daily USD Rate</title>
 <style>{CSS}</style>
 </head>
 <body>
 <main>
-  <h1>BPI USD to PHP</h1>
-  <p class="sub">Daily indicative rate from Bank of the Philippine Islands</p>
+  <h1>Daily USD rate</h1>
+  <p class="sub">Reference rate for student fees: BPI selling rate + PHP {markup_of(latest):.2f}</p>
 
-  <div class="tiles">
-    <div class="tile">
-      <div class="label">Bank buying</div>
-      <div class="value">PHP {latest["buying"]:.2f}</div>
-      <div class="chg">{change_html(latest, prev, "buying")}</div>
-      <div class="hint">What BPI pays you for your USD</div>
-    </div>
-    <div class="tile">
-      <div class="label">Bank selling</div>
-      <div class="value">PHP {latest["selling"]:.2f}</div>
-      <div class="chg">{change_html(latest, prev, "selling")}</div>
-      <div class="hint">What you pay BPI for USD</div>
-    </div>
+  <div class="hero">
+    <div class="label">Our rate (PHP per USD)</div>
+    <div class="value">PHP {our_rate(latest):.2f}</div>
+    <div class="chg">{change_html(latest, prev)}</div>
+    <div class="calc">BPI selling PHP {latest["selling"]:.2f} + PHP {markup_of(latest):.2f}
+      = <strong>PHP {our_rate(latest):.2f}</strong></div>
   </div>
-  <p class="muted" style="margin:10px 2px 0">BPI rate as of {as_of}</p>
+  <p class="muted" style="margin:10px 2px 0">Based on the BPI rate as of {as_of}</p>
 
   <h2>Last {min(len(history), TABLE_ROWS)} days</h2>
   <div class="card">{chart_svg(history)}</div>
@@ -245,7 +249,7 @@ def render_page(history):
   <h2>History</h2>
   <div class="card">
     <table>
-      <thead><tr><th>Date</th><th>Buying</th><th>Selling</th></tr></thead>
+      <thead><tr><th>Date</th><th>BPI selling</th><th>Our rate</th></tr></thead>
       <tbody>
 {body_rows}
       </tbody>
@@ -253,8 +257,8 @@ def render_page(history):
   </div>
 
   <footer>
-    Page last updated {checked} (Manila time). Rates are indicative, may change
-    without notice, and are subject to branch availability. Source:
+    Page last updated {checked} (Manila time). BPI rates are indicative and may
+    change without notice. Source:
     <a href="{BPI_URL}">BPI foreign exchange rates</a>.
   </footer>
 </main>
@@ -280,6 +284,8 @@ def main():
         "as_of": as_of,
         "buying": buying,
         "selling": selling,
+        "markup": MARKUP,
+        "our_rate": round(selling + MARKUP, 2),
         "checked": datetime.now(TZ).isoformat(timespec="seconds"),
     }
     history = update_history(load_history(), entry)
@@ -288,7 +294,10 @@ def main():
     HISTORY_FILE.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
     PAGE_FILE.write_text(render_page(history), encoding="utf-8")
 
-    print(f"{rate_date}: buying {buying:.2f} / selling {selling:.2f} ({as_of or 'time not shown'})")
+    print(
+        f"{rate_date}: BPI selling {selling:.2f} + {MARKUP:.2f} = our rate {entry['our_rate']:.2f} "
+        f"({as_of or 'time not shown'})"
+    )
     print(f"History rows: {len(history)}. Wrote {PAGE_FILE.name} and {HISTORY_FILE.name}.")
     return 0
 
