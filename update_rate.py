@@ -124,10 +124,10 @@ def nice_date(iso):
     return datetime.strptime(iso, "%Y-%m-%d").strftime("%a, %b %d, %Y")
 
 
-def change_html(latest, prev):
+def change_html(latest, prev, getter):
     if not prev:
         return '<span class="muted">first day recorded</span>'
-    diff = round(our_rate(latest) - our_rate(prev), 2)
+    diff = round(getter(latest) - getter(prev), 2)
     if diff == 0:
         return f'<span class="muted">no change vs {nice_date(prev["date"])}</span>'
     arrow, cls = ("&#9650;", "up") if diff > 0 else ("&#9660;", "down")
@@ -160,7 +160,7 @@ def chart_svg(rows):
     pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
 
     return f"""<svg viewBox="0 0 {W} {H}" role="img"
-  aria-label="Line chart of our daily USD rate, last {n} days">
+  aria-label="Line chart of the student rate, last {n} days">
   <line class="grid" x1="{PL}" y1="{y(hi):.1f}" x2="{W-PR}" y2="{y(hi):.1f}"/>
   <line class="grid" x1="{PL}" y1="{y(lo):.1f}" x2="{W-PR}" y2="{y(lo):.1f}"/>
   <text class="axis" x="{PL-6}" y="{y(hi)+4:.1f}" text-anchor="end">{hi:.2f}</text>
@@ -184,13 +184,14 @@ h1{font-size:1.5rem;margin:0 0 4px}
 h2{font-size:1.05rem;margin:32px 0 10px}
 .sub,.muted{color:var(--muted)}
 .sub{margin:0 0 20px}
-.hero{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
-.hero .label{color:var(--muted);font-size:.9rem}
-.hero .value{font-size:2.6rem;font-weight:700;line-height:1.15;margin:4px 0;
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.tile.main{border:2px solid var(--accent)}
+.tile .label{color:var(--muted);font-size:.9rem}
+.tile .value{font-size:1.9rem;font-weight:700;line-height:1.2;margin:4px 0;
 font-variant-numeric:tabular-nums}
-.hero .chg{font-size:.9rem}
-.hero .calc{margin-top:12px;padding-top:12px;border-top:1px solid var(--line);
-font-size:.95rem;font-variant-numeric:tabular-nums}
+.tile .chg{font-size:.85rem}
+.tile .hint{font-size:.85rem;color:var(--muted);margin-top:10px}
 .up{color:var(--up)}.down{color:var(--down)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
 svg{width:100%;height:auto;display:block}
@@ -205,7 +206,7 @@ td.rate{font-weight:650}
 tr:last-child td{border-bottom:0}
 footer{margin-top:28px;font-size:.8rem;color:var(--muted)}
 a{color:var(--accent)}
-@media (max-width:420px){.hero .value{font-size:2.1rem}}
+@media (max-width:420px){.tile .value{font-size:1.5rem}.tiles{gap:8px}}
 """
 
 
@@ -234,12 +235,19 @@ def render_page(history):
   <h1>Daily USD rate</h1>
   <p class="sub">Reference rate for student fees: BPI selling rate + PHP {markup_of(latest):.2f}</p>
 
-  <div class="hero">
-    <div class="label">Our rate (PHP per USD)</div>
-    <div class="value">PHP {our_rate(latest):.2f}</div>
-    <div class="chg">{change_html(latest, prev)}</div>
-    <div class="calc">BPI selling PHP {latest["selling"]:.2f} + PHP {markup_of(latest):.2f}
-      = <strong>PHP {our_rate(latest):.2f}</strong></div>
+  <div class="tiles">
+    <div class="tile">
+      <div class="label">Bank Selling</div>
+      <div class="value">PHP {latest["selling"]:.2f}</div>
+      <div class="chg">{change_html(latest, prev, lambda r: r["selling"])}</div>
+      <div class="hint">What you pay BPI for USD</div>
+    </div>
+    <div class="tile main">
+      <div class="label">Student Rate</div>
+      <div class="value">PHP {our_rate(latest):.2f}</div>
+      <div class="chg">{change_html(latest, prev, our_rate)}</div>
+      <div class="hint">What to charge and announce to applicants</div>
+    </div>
   </div>
   <p class="muted" style="margin:10px 2px 0">Based on the BPI rate as of {as_of}</p>
 
@@ -249,7 +257,7 @@ def render_page(history):
   <h2>History</h2>
   <div class="card">
     <table>
-      <thead><tr><th>Date</th><th>BPI selling</th><th>Our rate</th></tr></thead>
+      <thead><tr><th>Date</th><th>Bank Selling</th><th>Student Rate</th></tr></thead>
       <tbody>
 {body_rows}
       </tbody>
