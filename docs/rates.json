@@ -7,5 +7,14 @@
     "markup": 0.5,
     "our_rate": 64.35,
     "checked": "2026-11-15T01:42:53+08:00"
+  },
+  {
+    "date": "2026-11-16",
+    "as_of": "9:22 AM, November 16, 2026",
+    "buying": 63.5,
+    "selling": 64.0,
+    "markup": 0.5,
+    "our_rate": 64.5,
+    "checked": "2026-11-16T11:31:29+08:00"
   }
 ]
