@@ -1,35 +1,72 @@
+
 name: Update BPI USD rate page
 
 on:
   schedule:
-    # Mon-Fri at 9:30 AM and 4:45 PM Manila time (01:30 and 08:45 UTC)
-    - cron: "30 1 * * 1-5"
-    - cron: "00 2 * * 1-5"
-  workflow_dispatch: # manual run from the Actions tab
+    # First attempt: 9:30 AM Philippine time
+    - cron: "30 9 * * 1-5"
+      timezone: "Asia/Manila"
+
+    # Second attempt: 10:00 AM Philippine time
+    - cron: "0 10 * * 1-5"
+      timezone: "Asia/Manila"
+
+  workflow_dispatch:
 
 permissions:
-  contents: write # lets the job save the updated page to the repo
+  contents: write
+
+# Prevent simultaneous runs from interfering with each other.
+concurrency:
+  group: bpi-rate-update
+  cancel-in-progress: false
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - run: pip install requests
+      - name: Install dependencies
+        run: pip install requests
 
-      - name: Fetch BPI rate and rebuild the page
+      - name: Check whether update is already completed today
+        id: check
+        run: |
+          TODAY=$(TZ=Asia/Manila date +%F)
+
+          if [ -f docs/bpi_update_status.txt ]; then
+            STATUS=$(cat docs/bpi_update_status.txt)
+
+            if [ "$STATUS" = "$TODAY" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "BPI rate already updated today. Skipping."
+              exit 0
+            fi
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "No successful update recorded today. Proceeding."
+
+      - name: Fetch BPI rate and rebuild page
+        if: steps.check.outputs.skip != 'true'
         run: python update_rate.py
 
       - name: Save changes
+        if: steps.check.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           git add docs
+
           if git diff --cached --quiet; then
             echo "Nothing changed."
           else
