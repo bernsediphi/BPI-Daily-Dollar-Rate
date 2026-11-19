@@ -1,21 +1,21 @@
+
 #!/usr/bin/env python3
 """
-Fetch BPI's USD/PHP selling rate, add our markup, keep a history, and rebuild
-the web page that shows our daily rate.
+Fetch BPI's USD/PHP selling rate, add markup, keep history,
+and rebuild the GitHub Pages website.
 
-  Our daily rate = BPI selling rate + MARKUP
+Schedule:
+  9:30 AM Manila time: First attempt
+  10:00 AM Manila time: Retry if no new BPI rate was published
 
-The rate is a snapshot: the first run on each business day (scheduled for
-9:05 AM Manila time) locks in that day's rate, and later runs that day keep it.
-
-Writes (served by GitHub Pages from the /docs folder):
-  docs/rates.json   history, one row per day
-  docs/index.html   the page people open
+A snapshot is recorded only when BPI's rate date matches today.
+After a successful snapshot, docs/bpi_update_status.txt records
+the date so the second scheduled run can skip.
 
 Usage:
-  python update_rate.py                  take today's snapshot if not taken yet
-  python update_rate.py --force          replace today's snapshot with a new one
-  python update_rate.py --html-file F    read BPI's HTML from a local file (testing)
+  python update_rate.py
+  python update_rate.py --force
+  python update_rate.py --html-file test.html
 """
 
 import argparse
@@ -28,113 +28,210 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# Amount added to BPI's selling rate. Change it here if the markup changes;
-# rows already saved in the history keep the markup they were recorded with.
 MARKUP = 0.50
 
 BPI_URL = "https://www.bpi.com.ph/personal/bank/forex/rates"
 TZ = ZoneInfo("Asia/Manila")
+
 DOCS = Path(__file__).resolve().parent / "docs"
 HISTORY_FILE = DOCS / "rates.json"
 PAGE_FILE = DOCS / "index.html"
+STATUS_FILE = DOCS / "bpi_update_status.txt"
+
 MAX_ROWS = 365
 TABLE_ROWS = 30
+
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
     ),
     "Accept-Language": "en-PH,en;q=0.9",
 }
 
 
-# ---------------------------------------------------------------- fetching
+# ------------------------------------------------------------
+# FETCH BPI
+# ------------------------------------------------------------
+
 def fetch_html(retries=3):
-    import requests  # imported here so --html-file works without it
+    import requests
 
     last_err = None
+
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.get(BPI_URL, headers=HEADERS, timeout=30)
+            resp = requests.get(
+                BPI_URL,
+                headers=HEADERS,
+                timeout=30
+            )
             resp.raise_for_status()
             return resp.text
+
         except Exception as exc:
             last_err = exc
-            print(f"Attempt {attempt}/{retries} failed: {exc}", file=sys.stderr)
+
+            print(
+                f"Attempt {attempt}/{retries} failed: {exc}",
+                file=sys.stderr
+            )
+
             if attempt < retries:
                 time.sleep(10 * attempt)
+
     raise RuntimeError(f"Could not get BPI page: {last_err}")
 
 
 def parse_usd(page_html):
-    """Return (as_of_time_text, rate_date 'YYYY-MM-DD', buying, selling)."""
-    text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", page_html, flags=re.S)
+    """
+    Return:
+      as_of_text, rate_date, buying, selling
+
+    rate_date is None if BPI's publication date cannot be identified.
+    """
+
+    text = re.sub(
+        r"<script.*?</script>|<style.*?</style>",
+        " ",
+        page_html,
+        flags=re.S
+    )
+
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text)
 
     row = re.search(
-        r"\(USD\)\s*US Dollar\s*\|?\s*([\d,]+\.\d+)\s*\|?\s*([\d,]+\.\d+)", text
+        r"\(USD\)\s*US Dollar\s*\|?\s*([\d,]+\.\d+)\s*\|?\s*([\d,]+\.\d+)",
+        text
     )
+
     if not row:
         raise RuntimeError(
-            "USD row not found. BPI may have changed the page or blocked the request."
+            "USD row not found. BPI may have changed its page."
         )
+
     buying = float(row.group(1).replace(",", ""))
     selling = float(row.group(2).replace(",", ""))
 
     as_of_text = None
-    rate_date = datetime.now(TZ).strftime("%Y-%m-%d")
+    rate_date = None
+
     m = re.search(
-        r"As of\s+(\d{1,2}:\d{2})\s*([AP]M),\s*([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})", text
+        r"As of\s+(\d{1,2}:\d{2})\s*([AP]M),\s*"
+        r"([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})",
+        text
     )
+
     if m:
         hm, ampm, month, day, year = m.groups()
+
         as_of_text = f"{hm} {ampm}, {month} {day}, {year}"
-        for fmt in ("%I:%M %p %B %d %Y", "%I:%M %p %b %d %Y"):
+
+        for fmt in (
+            "%I:%M %p %B %d %Y",
+            "%I:%M %p %b %d %Y"
+        ):
             try:
-                parsed = datetime.strptime(f"{hm} {ampm} {month} {day} {year}", fmt)
+                parsed = datetime.strptime(
+                    f"{hm} {ampm} {month} {day} {year}",
+                    fmt
+                )
+
                 rate_date = parsed.strftime("%Y-%m-%d")
                 break
+
             except ValueError:
                 continue
+
     return as_of_text, rate_date, buying, selling
 
 
-# ----------------------------------------------------------------- history
+# ------------------------------------------------------------
+# HISTORY AND STATUS
+# ------------------------------------------------------------
+
 def load_history():
     if HISTORY_FILE.exists():
-        return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        return json.loads(
+            HISTORY_FILE.read_text(encoding="utf-8")
+        )
+
     return []
 
 
 def update_history(history, entry):
-    history = [h for h in history if h["date"] != entry["date"]]
+    history = [
+        h for h in history
+        if h["date"] != entry["date"]
+    ]
+
     history.append(entry)
     history.sort(key=lambda h: h["date"])
+
     return history[-MAX_ROWS:]
 
 
+def already_updated_today(today):
+    if not STATUS_FILE.exists():
+        return False
+
+    return STATUS_FILE.read_text(
+        encoding="utf-8"
+    ).strip() == today
+
+
+def record_successful_update(today):
+    STATUS_FILE.write_text(
+        today,
+        encoding="utf-8"
+    )
+
+
 def our_rate(row):
-    """Our rate for a history row (older rows without it use the current markup)."""
-    return row.get("our_rate", round(row["selling"] + MARKUP, 2))
+    return row.get(
+        "our_rate",
+        round(row["selling"] + MARKUP, 2)
+    )
 
 
 def markup_of(row):
     return row.get("markup", MARKUP)
 
 
-# --------------------------------------------------------------- rendering
+# ------------------------------------------------------------
+# RENDERING
+# ------------------------------------------------------------
+
 def nice_date(iso):
-    return datetime.strptime(iso, "%Y-%m-%d").strftime("%a, %b %d, %Y")
+    return datetime.strptime(
+        iso,
+        "%Y-%m-%d"
+    ).strftime("%a, %b %d, %Y")
 
 
 def change_html(latest, prev, getter):
     if not prev:
         return '<span class="muted">first day recorded</span>'
-    diff = round(getter(latest) - getter(prev), 2)
+
+    diff = round(
+        getter(latest) - getter(prev),
+        2
+    )
+
     if diff == 0:
-        return f'<span class="muted">no change vs {nice_date(prev["date"])}</span>'
-    arrow, cls = ("&#9650;", "up") if diff > 0 else ("&#9660;", "down")
+        return (
+            f'<span class="muted">no change vs '
+            f'{nice_date(prev["date"])}</span>'
+        )
+
+    arrow, cls = (
+        ("&#9650;", "up")
+        if diff > 0
+        else ("&#9660;", "down")
+    )
+
     return (
         f'<span class="{cls}">{arrow} {abs(diff):.2f}</span> '
         f'<span class="muted">vs {nice_date(prev["date"])}</span>'
@@ -143,16 +240,26 @@ def change_html(latest, prev, getter):
 
 def chart_svg(rows):
     rows = rows[-TABLE_ROWS:]
+
     if len(rows) < 2:
-        return '<p class="muted">The chart appears once there are two or more days of data.</p>'
+        return (
+            '<p class="muted">The chart appears once '
+            'there are two or more days of data.</p>'
+        )
+
     W, H, PL, PR, PT, PB = 640, 210, 52, 14, 14, 30
+
     vals = [our_rate(r) for r in rows]
+
     lo, hi = min(vals), max(vals)
+
     if hi - lo < 0.5:
         mid = (hi + lo) / 2
         lo, hi = mid - 0.25, mid + 0.25
+
     pad = (hi - lo) * 0.1
     lo, hi = lo - pad, hi + pad
+
     n = len(rows)
 
     def x(i):
@@ -161,17 +268,20 @@ def chart_svg(rows):
     def y(v):
         return PT + (H - PT - PB) * (hi - v) / (hi - lo)
 
-    pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(vals))
+    pts = " ".join(
+        f"{x(i):.1f},{y(v):.1f}"
+        for i, v in enumerate(vals)
+    )
 
     return f"""<svg viewBox="0 0 {W} {H}" role="img"
-  aria-label="Line chart of the student rate, last {n} days">
-  <line class="grid" x1="{PL}" y1="{y(hi):.1f}" x2="{W-PR}" y2="{y(hi):.1f}"/>
-  <line class="grid" x1="{PL}" y1="{y(lo):.1f}" x2="{W-PR}" y2="{y(lo):.1f}"/>
-  <text class="axis" x="{PL-6}" y="{y(hi)+4:.1f}" text-anchor="end">{hi:.2f}</text>
-  <text class="axis" x="{PL-6}" y="{y(lo)+4:.1f}" text-anchor="end">{lo:.2f}</text>
-  <text class="axis" x="{PL}" y="{H-8}" text-anchor="start">{rows[0]["date"]}</text>
-  <text class="axis" x="{W-PR}" y="{H-8}" text-anchor="end">{rows[-1]["date"]}</text>
-  <polyline class="line" points="{pts}"/>
+aria-label="Line chart of the student rate, last {n} days">
+<line class="grid" x1="{PL}" y1="{y(hi):.1f}" x2="{W-PR}" y2="{y(hi):.1f}"/>
+<line class="grid" x1="{PL}" y1="{y(lo):.1f}" x2="{W-PR}" y2="{y(lo):.1f}"/>
+<text class="axis" x="{PL-6}" y="{y(hi)+4:.1f}" text-anchor="end">{hi:.2f}</text>
+<text class="axis" x="{PL-6}" y="{y(lo)+4:.1f}" text-anchor="end">{lo:.2f}</text>
+<text class="axis" x="{PL}" y="{H-8}" text-anchor="start">{rows[0]["date"]}</text>
+<text class="axis" x="{W-PR}" y="{H-8}" text-anchor="end">{rows[-1]["date"]}</text>
+<polyline class="line" points="{pts}"/>
 </svg>"""
 
 
@@ -217,11 +327,18 @@ a{color:var(--accent)}
 def render_page(history):
     latest = history[-1]
     prev = history[-2] if len(history) > 1 else None
-    checked = datetime.fromisoformat(latest["checked"]).strftime("%a, %b %d, %Y %I:%M %p")
-    as_of = html.escape(latest.get("as_of") or latest["date"])
+
+    checked = datetime.fromisoformat(
+        latest["checked"]
+    ).strftime("%a, %b %d, %Y %I:%M %p")
+
+    as_of = html.escape(
+        latest.get("as_of") or latest["date"]
+    )
 
     body_rows = "\n".join(
-        f'<tr><td>{nice_date(h["date"])}</td><td>{h["selling"]:.2f}</td>'
+        f'<tr><td>{nice_date(h["date"])}</td>'
+        f'<td>{h["selling"]:.2f}</td>'
         f'<td class="rate">{our_rate(h):.2f}</td></tr>'
         for h in reversed(history[-TABLE_ROWS:])
     )
@@ -236,95 +353,166 @@ def render_page(history):
 </head>
 <body>
 <main>
-  <h1>Daily USD rate</h1>
-  <p class="sub">Reference rate for student fees: BPI selling rate + PHP {markup_of(latest):.2f}</p>
+<h1>Daily USD rate</h1>
+<p class="sub">Reference rate for student fees: BPI selling rate + PHP {markup_of(latest):.2f}</p>
 
-  <div class="tiles">
-    <div class="tile">
-      <div class="label">Bank Selling</div>
-      <div class="value">PHP {latest["selling"]:.2f}</div>
-      <div class="chg">{change_html(latest, prev, lambda r: r["selling"])}</div>
-      <div class="hint">What you pay BPI for USD</div>
-    </div>
-    <div class="tile main">
-      <div class="label">Student Rate</div>
-      <div class="value">PHP {our_rate(latest):.2f}</div>
-      <div class="chg">{change_html(latest, prev, our_rate)}</div>
-      <div class="hint">What to charge and announce to applicants</div>
-    </div>
-  </div>
-  <p class="muted" style="margin:10px 2px 0">Snapshot taken {checked} (Manila time).
-    BPI rate as of {as_of}.</p>
+<div class="tiles">
+<div class="tile">
+<div class="label">Bank Selling</div>
+<div class="value">PHP {latest["selling"]:.2f}</div>
+<div class="chg">{change_html(latest, prev, lambda r: r["selling"])}</div>
+<div class="hint">What you pay BPI for USD</div>
+</div>
 
-  <h2>Last {min(len(history), TABLE_ROWS)} days</h2>
-  <div class="card">{chart_svg(history)}</div>
+<div class="tile main">
+<div class="label">Student Rate</div>
+<div class="value">PHP {our_rate(latest):.2f}</div>
+<div class="chg">{change_html(latest, prev, our_rate)}</div>
+<div class="hint">What to charge and announce to applicants</div>
+</div>
+</div>
 
-  <h2>History</h2>
-  <div class="card">
-    <table>
-      <thead><tr><th>Date</th><th>Bank Selling</th><th>Student Rate</th></tr></thead>
-      <tbody>
+<p class="muted" style="margin:10px 2px 0">
+Snapshot taken {checked} (Manila time). BPI rate as of {as_of}.
+</p>
+
+<h2>Last {min(len(history), TABLE_ROWS)} days</h2>
+<div class="card">{chart_svg(history)}</div>
+
+<h2>History</h2>
+<div class="card">
+<table>
+<thead>
+<tr><th>Date</th><th>Bank Selling</th><th>Student Rate</th></tr>
+</thead>
+<tbody>
 {body_rows}
-      </tbody>
-    </table>
-  </div>
+</tbody>
+</table>
+</div>
 
-  <footer>
-    BPI rates are indicative and may change without notice. Source:
-    <a href="{BPI_URL}">BPI foreign exchange rates</a>.
-  </footer>
+<footer>
+BPI rates are indicative and may change without notice. Source:
+<a href="{BPI_URL}">BPI foreign exchange rates</a>.
+</footer>
 </main>
 </body>
 </html>
 """
 
 
-# -------------------------------------------------------------------- main
+# ------------------------------------------------------------
+# SNAPSHOT
+# ------------------------------------------------------------
+
 def take_snapshot(history, today, html_file=None):
-    """Fetch BPI's rate and record it as the reference rate for `today`."""
-    page_html = Path(html_file).read_text(encoding="utf-8") if html_file else fetch_html()
-    as_of, _bpi_date, buying, selling = parse_usd(page_html)
+    page_html = (
+        Path(html_file).read_text(encoding="utf-8")
+        if html_file
+        else fetch_html()
+    )
+
+    as_of, rate_date, buying, selling = parse_usd(page_html)
+
+    # Do not snapshot yesterday's or an undated BPI rate.
+    if rate_date != today:
+        print(
+            f"BPI has not published a rate for {today}. "
+            f"Latest BPI rate date: {rate_date or 'unknown'}. "
+            "No snapshot recorded."
+        )
+        return history, False
+
     entry = {
-        "date": today,  # the day this snapshot is the reference for
-        "as_of": as_of,  # when BPI says its own rate was set
+        "date": today,
+        "as_of": as_of,
         "buying": buying,
         "selling": selling,
         "markup": MARKUP,
         "our_rate": round(selling + MARKUP, 2),
-        "checked": datetime.now(TZ).isoformat(timespec="seconds"),  # snapshot time
+        "checked": datetime.now(TZ).isoformat(timespec="seconds"),
     }
-    print(
-        f"{today}: BPI selling {selling:.2f} + {MARKUP:.2f} = student rate "
-        f"{entry['our_rate']:.2f} (BPI as of {as_of or 'time not shown'})"
-    )
-    return update_history(history, entry)
 
+    print(
+        f"{today}: BPI selling {selling:.2f} + {MARKUP:.2f} "
+        f"= student rate {entry['our_rate']:.2f}"
+    )
+
+    return update_history(history, entry), True
+
+
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--html-file", help="read BPI HTML from this file instead of fetching")
-    parser.add_argument("--force", action="store_true",
-                        help="take a new snapshot even if today's was already taken")
+
+    parser.add_argument(
+        "--html-file",
+        help="Read BPI HTML from a local file instead of fetching"
+    )
+
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force a snapshot even if one was already recorded today"
+    )
+
     args = parser.parse_args()
 
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
-    history = load_history()
-    have_today = any(h["date"] == today for h in history)
-    weekend = now.weekday() >= 5
-
-    # One snapshot per business day: the first run of the day locks in the rate.
-    if args.force or not history or (not have_today and not weekend):
-        history = take_snapshot(history, today, args.html_file)
-    elif have_today:
-        print(f"Snapshot for {today} already taken - keeping it.")
-    else:
-        print("Weekend - no new snapshot, keeping the last one.")
 
     DOCS.mkdir(exist_ok=True)
-    HISTORY_FILE.write_text(json.dumps(history, indent=2) + "\n", encoding="utf-8")
-    PAGE_FILE.write_text(render_page(history), encoding="utf-8")
-    print(f"History rows: {len(history)}. Wrote {PAGE_FILE.name} and {HISTORY_FILE.name}.")
+
+    history = load_history()
+
+    weekend = now.weekday() >= 5
+
+    if weekend and not args.force:
+        print("Weekend - no new snapshot.")
+        return 0
+
+    if already_updated_today(today) and not args.force:
+        print(f"Already updated successfully on {today}. Skipping.")
+        return 0
+
+    # Attempt to fetch and validate today's BPI rate.
+    history, success = take_snapshot(
+        history,
+        today,
+        args.html_file
+    )
+
+    if success:
+        # Save history and page first.
+        HISTORY_FILE.write_text(
+            json.dumps(history, indent=2) + "\n",
+            encoding="utf-8"
+        )
+
+        PAGE_FILE.write_text(
+            render_page(history),
+            encoding="utf-8"
+        )
+
+        # Only mark success after both files are written.
+        record_successful_update(today)
+
+        print("Today's BPI snapshot successfully published locally.")
+
+    else:
+        print(
+            "No new BPI rate yet. The 10:00 AM attempt "
+            "will be allowed to retry."
+        )
+
+    print(
+        f"History rows: {len(history)}. "
+        f"Wrote {PAGE_FILE.name} and {HISTORY_FILE.name}."
+    )
+
     return 0
 
 
